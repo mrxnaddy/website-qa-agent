@@ -1,0 +1,138 @@
+# 🌐 Website Q&A AI Agent
+
+A Streamlit web app that scrapes a website (or PDF) and lets you ask natural-language
+questions about its content — in **English**, **Urdu**, or **Roman Urdu** — powered by
+Groq's `llama-3.3-70b-versatile` model. Answers are grounded strictly in the scraped
+content, with hallucination explicitly forbidden by the system prompt.
+
+## ✨ Features
+
+- 🔗 Paste any website URL — scraped with `trafilatura` (falls back to `BeautifulSoup`
+  if extraction is too thin)
+- 📄 Paste a direct PDF link — text extracted with `pdfplumber`
+- 💬 Multi-turn chat with full conversation history sent to the LLM
+- 🧠 Answers are grounded *only* in scraped content — the model is instructed to say
+  "not mentioned on the page" instead of guessing
+- 📝 Structured summaries on request (main topic, purpose, key points, calls-to-action)
+- 🌍 Auto language matching (English / Urdu / Roman Urdu) + auto-detection of the
+  scraped page's language
+- 🆚 "Compare two websites" mode
+- 🔍 Collapsible "Source excerpt" under each answer for transparency
+- 📊 Word/character count of scraped content
+- 🔄 One-click "Clear chat / New website" reset
+- 🛡️ Friendly error handling everywhere — no raw tracebacks shown to users
+
+## 🏗️ Project structure
+
+```
+website-qa-agent/
+├── app.py              # Main Streamlit app (UI, session state, chat loop)
+├── scraper.py          # HTML + PDF scraping, language detection
+├── llm.py              # Groq API calls, system prompt, source-excerpt finder
+├── requirements.txt
+├── .env.example
+├── .gitignore
+└── README.md
+```
+
+## 🚀 Getting started (local)
+
+1. **Clone and enter the project**
+   ```bash
+   git clone <your-repo-url>
+   cd website-qa-agent
+   ```
+
+2. **Create a virtual environment (recommended)**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate      # Windows: venv\Scripts\activate
+   ```
+
+3. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Set up your API key**
+   ```bash
+   cp .env.example .env
+   ```
+   Then edit `.env` and paste your Groq API key (get one free at
+   [console.groq.com/keys](https://console.groq.com/keys)):
+   ```
+   GROQ_API_KEY=gsk_your_real_key_here
+   ```
+
+5. **Run the app**
+   ```bash
+   streamlit run app.py
+   ```
+   The app will open at `http://localhost:8501`.
+
+## ☁️ Deploying to Streamlit Community Cloud
+
+1. Push this project to a GitHub repository.
+2. Go to [share.streamlit.io](https://share.streamlit.io) and create a new app
+   pointing at your repo, with `app.py` as the entry point.
+3. In your app's **Settings → Secrets**, add:
+   ```toml
+   GROQ_API_KEY = "gsk_your_real_key_here"
+   ```
+4. Deploy. The app automatically reads from `st.secrets` on Streamlit Cloud and
+   from `.env` locally — no code changes needed.
+
+## 🧪 How it works
+
+1. **Scraping** (`scraper.py`): the URL is checked for a `.pdf` extension or PDF
+   content-type. HTML pages are fetched with a browser-like `User-Agent` to avoid
+   403s, then parsed first with `trafilatura`; if that returns too little text, it
+   falls back to a `BeautifulSoup` pass over `<h1>`–`<h3>`, `<p>`, and `<li>` tags.
+2. **Caching**: the scraped text is stored in `st.session_state` and reused for
+   every question — the page is only scraped once, when you click "Scrape & Start".
+3. **Chat**: each question, plus full conversation history, is sent to Groq
+   alongside a system prompt containing the scraped content and strict grounding
+   rules (see `llm.py::build_system_prompt`).
+4. **Source excerpts**: a lightweight keyword-overlap heuristic
+   (`llm.py::find_relevant_excerpt`) highlights the sentences in the scraped
+   content most related to your question, shown in a collapsible section under
+   each answer — a hint about the answer's basis, not a formal citation.
+
+## 🖥️ Handling JavaScript-heavy websites (optional)
+
+Some sites (React/Next.js/Vue single-page apps) load their real content via
+client-side JavaScript, so a plain HTTP scraper only sees an empty page shell.
+This app already tries several free fallbacks first — parsing structured
+`<script type="application/ld+json">` data and embedded framework state
+(e.g. Next.js `__NEXT_DATA__`) — which resolves many cases without any extra
+setup. If a page is still too thin after that, you'll see a warning in the
+app suggesting you install Playwright for a real headless-browser render:
+
+```bash
+pip install playwright
+playwright install chromium
+```
+
+Then just restart the app — no code changes needed. This is optional; the
+app works without it, just with reduced accuracy on heavily JS-rendered pages.
+
+## 🔁 If you get a "model decommissioned" or "AI response" error
+
+Groq periodically retires older models. If chat requests start failing, check
+[console.groq.com/docs/deprecations](https://console.groq.com/docs/deprecations)
+for the current recommended model, then update `MODEL_NAME` at the top of `llm.py`.
+As of this project's last update, the model in use is `openai/gpt-oss-120b`
+(Groq's recommended replacement for the now-retired `llama-3.3-70b-versatile`).
+
+## ⚠️ Limitations
+
+- JavaScript-heavy sites that render content client-side may not scrape well
+  (no headless browser is used).
+- Scanned/image-only PDFs won't yield text (no OCR is included).
+- The "source excerpt" feature uses simple keyword overlap, not true semantic
+  retrieval — treat it as a helpful pointer, not a guarantee.
+- Language detection (`langdetect`) is probabilistic and can be wrong on short text.
+
+## 📄 License
+
+MIT — use freely for personal or commercial projects.
