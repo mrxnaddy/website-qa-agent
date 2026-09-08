@@ -7,14 +7,13 @@ Run:
     streamlit run app.py
 """
 
+import shutil
+import pytesseract
 import streamlit as st
 from dotenv import load_dotenv
-import pytesseract
 
 from scraper import scrape, scrape_uploaded_file, is_pdf_url, PLAYWRIGHT_AVAILABLE
 from llm import get_answer, find_relevant_excerpt
-import shutil
-import pytesseract
 
 # Check if running on Streamlit Cloud (Linux) or Windows
 if shutil.which("tesseract"):
@@ -22,7 +21,10 @@ if shutil.which("tesseract"):
     pass
 else:
     # Local Windows fallback path
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    try:
+        pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    except Exception:
+        pass
 
 load_dotenv()
 
