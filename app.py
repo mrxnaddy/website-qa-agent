@@ -9,6 +9,11 @@ Run:
 
 import shutil
 #import pytesseract
+try:
+    import pytesseract
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -308,18 +313,21 @@ if analyze_clicked:
 
             ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
             if ext in {"png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"}:
-                mime_map = {
-                    "png": "image/png",
-                    "jpg": "image/jpeg",
-                    "jpeg": "image/jpeg",
-                    "webp": "image/webp",
-                    "bmp": "image/bmp",
-                    "tif": "image/tiff",
-                    "tiff": "image/tiff",
-                }
-                # Keep original image for Groq vision analysis.
-                st.session_state.image_bytes = file_bytes
-                st.session_state.image_mime = mime_map.get(ext, "image/jpeg")
+                if not OCR_AVAILABLE:
+                    st.warning("⚠️ Scanned images and OCR features are currently unavailable on this cloud deployment.")
+                else:
+                    mime_map = {
+                        "png": "image/png",
+                        "jpg": "image/jpeg",
+                        "jpeg": "image/jpeg",
+                        "webp": "image/webp",
+                        "bmp": "image/bmp",
+                        "tif": "image/tiff",
+                        "tiff": "image/tiff",
+                    }
+                    # Keep original image for Groq vision analysis.
+                    st.session_state.image_bytes = file_bytes
+                    st.session_state.image_mime = mime_map.get(ext, "image/jpeg")
 
             if result_a.get("success"):
                 st.session_state.scraped = True
