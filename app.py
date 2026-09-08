@@ -8,7 +8,7 @@ Run:
 """
 
 import shutil
-#import pytesseract
+
 try:
     import pytesseract
     OCR_AVAILABLE = True
