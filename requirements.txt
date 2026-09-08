@@ -10,9 +10,5 @@ groq>=0.9.0
 pytesseract>=0.3.10
 Pillow>=10.0.0
 PyMuPDF>=1.23.0
-
-# Optional — enables headless-browser rendering as a fallback for
-# JavaScript-heavy sites (React/Next.js/Vue apps). Not required for most
-# sites; the app works fine without it, just with a warning on JS-heavy pages.
-# After installing, run once: playwright install chromium
-# playwright>=1.45.0
+pandas>=2.0.0
+openpyxl>=3.1.0
