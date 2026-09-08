@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import re
+import zipfile
 from urllib.parse import urlparse
 
 import requests
@@ -33,10 +34,30 @@ except ImportError:  # pragma: no cover
     pdfplumber = None
 
 try:
+    import fitz  # PyMuPDF: renders scanned PDF pages for OCR
+except ImportError:  # pragma: no cover
+    fitz = None
+
+try:
+    import pytesseract
+except ImportError:  # pragma: no cover
+    pytesseract = None
+
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover
+    Image = None
+
+try:
     from langdetect import detect, LangDetectException
 except ImportError:  # pragma: no cover
     detect = None
     LangDetectException = Exception
+
+try:
+    import pandas as pd
+except ImportError:  # pragma: no cover
+    pd = None
 
 try:
     from playwright.sync_api import sync_playwright
@@ -554,6 +575,79 @@ def scrape_website(url: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# OCR / visual extraction helpers
+# ---------------------------------------------------------------------------
+
+def _ocr_image_bytes(image_bytes: bytes, lang: str = "eng") -> str:
+    """OCR an image in memory. Returns empty text when OCR is unavailable/fails."""
+    if pytesseract is None or Image is None:
+        return ""
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        # A moderate upscale often improves OCR on screenshots/scans.
+        if max(image.size) < 1800:
+            scale = 1800 / max(image.size)
+            image = image.resize(
+                (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+            )
+        text = pytesseract.image_to_string(image, lang=lang)
+        return _clean_whitespace(text or "")
+    except Exception:
+        return ""
+
+
+def _ocr_pdf_bytes(file_bytes: bytes, dpi: int = 180) -> str:
+    """Render PDF pages and OCR them when normal PDF text extraction is empty."""
+    if fitz is None or pytesseract is None or Image is None:
+        return ""
+
+    chunks = []
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        for page_no, page in enumerate(doc, start=1):
+            pix = page.get_pixmap(dpi=dpi, alpha=False)
+            image_bytes = pix.tobytes("png")
+            text = _ocr_image_bytes(image_bytes)
+            if text:
+                chunks.append(f"Page {page_no}\n{text}")
+        doc.close()
+    except Exception:
+        return ""
+    return _clean_whitespace("\n\n".join(chunks))
+
+
+def _ocr_embedded_office_images(file_bytes: bytes, extension: str) -> str:
+    """OCR embedded images from DOCX/PPTX containers."""
+    if pytesseract is None or Image is None:
+        return ""
+    if extension not in ("docx", "pptx"):
+        return ""
+
+    chunks = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            media_files = [
+                name for name in zf.namelist()
+                if name.startswith("word/media/") or name.startswith("ppt/media/")
+            ]
+            for name in media_files:
+                text = _ocr_image_bytes(zf.read(name))
+                if text:
+                    chunks.append(f"Embedded image: {name.split('/')[-1]}\n{text}")
+    except Exception:
+        return ""
+    return _clean_whitespace("\n\n".join(chunks))
+
+
+def _ocr_dependency_message() -> str:
+    return (
+        "OCR is not available. Install the Python packages "
+        "'pytesseract', 'Pillow', and 'PyMuPDF', and install the "
+        "Tesseract OCR application on Windows. Then restart Streamlit."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public: PDF scraping
 # ---------------------------------------------------------------------------
 
@@ -651,6 +745,411 @@ def scrape_pdf(url: str) -> dict:
         "method": "pdfplumber",
         "title": title,
     }
+
+
+# ---------------------------------------------------------------------------
+# Public: uploaded-file scraping (PDF / DOCX / TXT)
+# ---------------------------------------------------------------------------
+
+def scrape_uploaded_pdf(file_bytes: bytes, filename: str) -> dict:
+    """
+    Extract text from an uploaded PDF.
+    Strategy:
+      1. pdfplumber for native/selectable PDF text.
+      2. PyMuPDF + Tesseract OCR for scanned/image-only PDFs.
+    """
+    native_text = ""
+    native_error = None
+
+    if pdfplumber is not None:
+        try:
+            pages_text = []
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text() or ""
+                    if page_text.strip():
+                        pages_text.append(page_text)
+            native_text = _clean_whitespace("\n\n".join(pages_text))
+        except Exception as exc:
+            native_error = exc.__class__.__name__
+
+    if native_text:
+        return {
+            "success": True,
+            "text": native_text,
+            "error": None,
+            "method": "pdfplumber (upload)",
+            "title": filename,
+            "ocr_used": False,
+        }
+
+    # Native text was empty: automatically try OCR.
+    ocr_text = _ocr_pdf_bytes(file_bytes)
+    if ocr_text:
+        return {
+            "success": True,
+            "text": ocr_text,
+            "error": None,
+            "method": "PyMuPDF + Tesseract OCR (scanned PDF)",
+            "title": filename,
+            "ocr_used": True,
+        }
+
+    if pdfplumber is None:
+        error = "PDF text extraction is unavailable and OCR could not be used. " + _ocr_dependency_message()
+    elif native_error:
+        error = (
+            "Couldn't read the PDF with the normal extractor, and OCR also failed. "
+            + _ocr_dependency_message()
+        )
+    else:
+        error = (
+            "No selectable text was found. This appears to be a scanned/image-only PDF, "
+            "but OCR could not extract text. " + _ocr_dependency_message()
+        )
+
+    return {
+        "success": False,
+        "text": "",
+        "error": error,
+        "method": None,
+        "title": filename,
+        "ocr_used": False,
+    }
+
+
+def scrape_uploaded_docx(file_bytes: bytes, filename: str) -> dict:
+    """
+    Extract text from an in-memory .docx file using python-docx.
+    Pulls paragraph text and table cell text. Returns the same shaped
+    dict as scrape().
+    """
+    try:
+        import docx  # python-docx
+    except ImportError:
+        return {
+            "success": False,
+            "text": "",
+            "error": "DOCX support isn't available (python-docx not installed).",
+            "method": None,
+            "title": filename,
+        }
+
+    try:
+        document = docx.Document(io.BytesIO(file_bytes))
+        chunks = [p.text for p in document.paragraphs if p.text.strip()]
+        for table in document.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    if cell.text.strip():
+                        chunks.append(cell.text.strip())
+        full_text = _clean_whitespace("\n".join(chunks))
+    except Exception:
+        return {
+            "success": False,
+            "text": "",
+            "error": "Couldn't read this Word document. It may be corrupted or in an unsupported .doc (not .docx) format.",
+            "method": None,
+            "title": filename,
+        }
+
+    if not full_text:
+        return {
+            "success": False,
+            "text": "",
+            "error": "No readable text was found in this document.",
+            "method": None,
+            "title": filename,
+        }
+
+    # Also inspect embedded screenshots/scanned pages when present.
+    image_text = _ocr_embedded_office_images(file_bytes, "docx")
+    if image_text:
+        full_text = _clean_whitespace(full_text + "\n\n" + image_text)
+
+    return {
+        "success": True,
+        "text": full_text,
+        "error": None,
+        "method": "python-docx + OCR for embedded images (upload)" if image_text else "python-docx (upload)",
+        "title": filename,
+        "ocr_used": bool(image_text),
+    }
+
+
+def scrape_uploaded_txt(file_bytes: bytes, filename: str) -> dict:
+    """Extract text from an in-memory plain-text (.txt/.md) file."""
+    try:
+        # Try UTF-8 first, fall back to latin-1 so we never crash on odd encodings.
+        try:
+            full_text = file_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            full_text = file_bytes.decode("latin-1")
+        full_text = _clean_whitespace(full_text)
+    except Exception:
+        return {
+            "success": False,
+            "text": "",
+            "error": "Couldn't read this text file.",
+            "method": None,
+            "title": filename,
+        }
+
+    if not full_text:
+        return {
+            "success": False,
+            "text": "",
+            "error": "This file appears to be empty.",
+            "method": None,
+            "title": filename,
+        }
+
+    return {
+        "success": True,
+        "text": full_text,
+        "error": None,
+        "method": "plain text (upload)",
+        "title": filename,
+    }
+
+
+
+def scrape_uploaded_excel(file_bytes: bytes, filename: str) -> dict:
+    """Extract readable text from .xlsx/.xls Excel workbooks."""
+    if pd is None:
+        return {
+            "success": False,
+            "text": "",
+            "error": "Excel support isn't available (pandas not installed).",
+            "method": None,
+            "title": filename,
+        }
+
+    try:
+        ext = filename.lower().rsplit(".", 1)[-1]
+        engine = "openpyxl" if ext == "xlsx" else None
+        sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, engine=engine)
+        chunks = []
+
+        for sheet_name, df in sheets.items():
+            chunks.append(f"Sheet: {sheet_name}")
+            if df is not None and not df.empty:
+                # Keep headers and rows readable for the LLM.
+                chunks.append(df.fillna("").to_csv(index=False))
+            else:
+                chunks.append("(empty sheet)")
+
+        full_text = _clean_whitespace("\n".join(chunks))
+    except Exception as exc:
+        return {
+            "success": False,
+            "text": "",
+            "error": (
+                "Couldn't read this Excel file. Make sure it is a valid "
+                f".xlsx/.xls workbook. ({exc.__class__.__name__})"
+            ),
+            "method": None,
+            "title": filename,
+        }
+
+    if not full_text:
+        return {
+            "success": False,
+            "text": "",
+            "error": "This Excel file appears to be empty.",
+            "method": None,
+            "title": filename,
+        }
+
+    return {
+        "success": True,
+        "text": full_text,
+        "error": None,
+        "method": "pandas (Excel upload)",
+        "title": filename,
+    }
+
+
+def scrape_uploaded_csv(file_bytes: bytes, filename: str) -> dict:
+    """Extract readable text from a CSV upload."""
+    if pd is None:
+        return {
+            "success": False,
+            "text": "",
+            "error": "CSV support isn't available (pandas not installed).",
+            "method": None,
+            "title": filename,
+        }
+
+    try:
+        df = pd.read_csv(io.BytesIO(file_bytes))
+        full_text = _clean_whitespace(df.fillna("").to_csv(index=False))
+    except Exception as exc:
+        return {
+            "success": False,
+            "text": "",
+            "error": f"Couldn't read this CSV file ({exc.__class__.__name__}).",
+            "method": None,
+            "title": filename,
+        }
+
+    if not full_text:
+        return {
+            "success": False,
+            "text": "",
+            "error": "This CSV file appears to be empty.",
+            "method": None,
+            "title": filename,
+        }
+
+    return {
+        "success": True,
+        "text": full_text,
+        "error": None,
+        "method": "pandas (CSV upload)",
+        "title": filename,
+    }
+
+
+def scrape_uploaded_pptx(file_bytes: bytes, filename: str) -> dict:
+    """Extract text from PowerPoint .pptx slides."""
+    try:
+        from pptx import Presentation
+    except ImportError:
+        return {
+            "success": False,
+            "text": "",
+            "error": "PPTX support isn't available (python-pptx not installed).",
+            "method": None,
+            "title": filename,
+        }
+
+    try:
+        prs = Presentation(io.BytesIO(file_bytes))
+        chunks = []
+        for slide_no, slide in enumerate(prs.slides, start=1):
+            slide_parts = []
+            for shape in slide.shapes:
+                if hasattr(shape, "text") and shape.text.strip():
+                    slide_parts.append(shape.text.strip())
+            if slide_parts:
+                chunks.append(f"Slide {slide_no}\n" + "\n".join(slide_parts))
+
+        full_text = _clean_whitespace("\n\n".join(chunks))
+    except Exception as exc:
+        return {
+            "success": False,
+            "text": "",
+            "error": f"Couldn't read this PowerPoint file ({exc.__class__.__name__}).",
+            "method": None,
+            "title": filename,
+        }
+
+    if not full_text:
+        return {
+            "success": False,
+            "text": "",
+            "error": "No readable text was found in this PowerPoint file.",
+            "method": None,
+            "title": filename,
+        }
+
+    image_text = _ocr_embedded_office_images(file_bytes, "pptx")
+    if image_text:
+        full_text = _clean_whitespace(full_text + "\n\n" + image_text)
+
+    return {
+        "success": True,
+        "text": full_text,
+        "error": None,
+        "method": "python-pptx + OCR for embedded images (upload)" if image_text else "python-pptx (upload)",
+        "title": filename,
+        "ocr_used": bool(image_text),
+    }
+
+
+def scrape_uploaded_image(file_bytes: bytes, filename: str) -> dict:
+    """OCR an uploaded image (PNG/JPG/JPEG/WEBP/BMP/TIFF)."""
+    text = _ocr_image_bytes(file_bytes)
+    if not text:
+        return {
+            "success": False,
+            "text": "",
+            "error": (
+                "No readable text was found in this image. "
+                + _ocr_dependency_message()
+            ),
+            "method": None,
+            "title": filename,
+        }
+
+    return {
+        "success": True,
+        "text": text,
+        "error": None,
+        "method": "Tesseract OCR (image upload)",
+        "title": filename,
+        "ocr_used": True,
+    }
+
+
+def scrape_uploaded_file(file_bytes: bytes, filename: str) -> dict:
+    """
+    Unified entry point for uploaded files: routes to the right extractor
+    based on file extension, then attaches language/word-count metadata
+    just like scrape() does for URLs.
+    """
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+
+    if ext == "pdf":
+        result = scrape_uploaded_pdf(file_bytes, filename)
+    elif ext == "docx":
+        result = scrape_uploaded_docx(file_bytes, filename)
+    elif ext in ("txt", "md"):
+        result = scrape_uploaded_txt(file_bytes, filename)
+    elif ext in ("xlsx", "xls"):
+        result = scrape_uploaded_excel(file_bytes, filename)
+    elif ext == "csv":
+        result = scrape_uploaded_csv(file_bytes, filename)
+    elif ext == "pptx":
+        result = scrape_uploaded_pptx(file_bytes, filename)
+    elif ext in ("png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"):
+        result = scrape_uploaded_image(file_bytes, filename)
+    elif ext == "doc":
+        result = {
+            "success": False,
+            "text": "",
+            "error": (
+                "Old-style .doc files aren't supported — please save/export it as "
+                ".docx (Word) or .pdf and upload that instead."
+            ),
+            "method": None,
+            "title": filename,
+        }
+    else:
+        result = {
+            "success": False,
+            "text": "",
+            "error": (
+                f"Unsupported file type '.{ext}'. Please upload PDF, DOCX, TXT, "
+                "MD, XLSX, XLS, CSV, PPTX, PNG, JPG, JPEG, WEBP, BMP, or TIFF."
+            ),
+            "method": None,
+            "title": filename,
+        }
+
+    if result["success"]:
+        result["language"] = detect_language(result["text"])
+        result["word_count"] = len(result["text"].split())
+        result["char_count"] = len(result["text"])
+        result["is_low_content"] = result["word_count"] < LOW_CONTENT_WORD_THRESHOLD
+    else:
+        result["language"] = None
+        result["word_count"] = 0
+        result["char_count"] = 0
+        result["is_low_content"] = False
+
+    return result
 
 
 # ---------------------------------------------------------------------------
