@@ -8,7 +8,7 @@ Run:
 """
 
 import shutil
-import pytesseract
+#import pytesseract
 import streamlit as st
 from dotenv import load_dotenv
 
