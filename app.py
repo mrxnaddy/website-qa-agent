@@ -15,16 +15,16 @@ from dotenv import load_dotenv
 from scraper import scrape, scrape_uploaded_file, is_pdf_url, PLAYWRIGHT_AVAILABLE
 from llm import get_answer, find_relevant_excerpt
 
-# Check if running on Streamlit Cloud (Linux) or Windows
-if shutil.which("tesseract"):
-    # Linux / Streamlit Cloud finds it automatically via PATH
-    pass
-else:
-    # Local Windows fallback path
-    try:
-        pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-    except Exception:
-        pass
+# # Check if running on Streamlit Cloud (Linux) or Windows
+# if shutil.which("tesseract"):
+#     # Linux / Streamlit Cloud finds it automatically via PATH
+#     pass
+# else:
+#     # Local Windows fallback path
+#     try:
+#         pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+#     except Exception:
+#         pass
 
 load_dotenv()
 
